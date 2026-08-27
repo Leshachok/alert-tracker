@@ -68,6 +68,9 @@
   .chip[aria-pressed="true"]{color:var(--fg);border-color:currentColor}
   .chip .swatch{width:8px;height:8px;border-radius:50%;flex:none}
   .chip .n{color:var(--dim);font-variant-numeric:tabular-nums}
+  .chip .ago{color:var(--dim);font-variant-numeric:tabular-nums}
+  .chip.stale{border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+  .devices .waiting{color:var(--dim);font-size:12.5px;padding:4px 2px}
 
   ul.history{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1 1 auto;-webkit-overflow-scrolling:touch}
   li.point{
@@ -82,6 +85,8 @@
   }
   .row1{grid-column:2;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
   .when{font-weight:600}
+  /* The device is the fact being checked on a two-phone walk, so it reads before the numbers. */
+  .dev{font-weight:600;font-size:12.5px}
   .abs{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
   .row2{grid-column:2;color:var(--muted);font-size:12.5px;display:flex;gap:8px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
   .tag{
@@ -140,6 +145,14 @@
   .leaflet-popup-content{margin:10px 12px;font-variant-numeric:tabular-nums}
   .leaflet-popup-content b{display:block;margin-bottom:3px}
   .leaflet-popup-content .m{color:var(--muted);font-size:12.5px}
+  /* Names the newest point of each trail, so "is the iPhone still posting" is answered by
+     looking at the map rather than by clicking a pin. */
+  .leaflet-tooltip.dev-label{
+    background:var(--panel);border:1px solid var(--line);color:var(--fg);
+    box-shadow:0 2px 10px rgba(0,0,0,.5);font-size:11.5px;font-weight:600;padding:3px 7px;
+    border-radius:6px;white-space:nowrap
+  }
+  .leaflet-tooltip.dev-label::before{border-right-color:var(--line)}
   .marker-n{
     display:grid;place-items:center;border-radius:50%;font-size:11px;font-weight:700;
     color:#0b0e13;border:2px solid rgba(11,14,19,.65);font-variant-numeric:tabular-nums
@@ -206,6 +219,10 @@
   const BAKED_DB_URL = "https://fir-alert-mobile-uz-default-rtdb.europe-west1.firebasedatabase.app";
 
   const POLL_MS = 5000;
+  // How long without a point before a device's chip is flagged. Generous, because silence is the
+  // designed output for a phone standing still — see LOCATION.md, "Why there is no staleness
+  // watchdog". This only marks a chip; it never claims anything is broken.
+  const STALE_MS = 20 * 60 * 1000;
   const PALETTE = ["#58a6ff","#3fb950","#d29922","#bc8cff","#f85149","#39c5cf","#ff9bce","#e3b341"];
 
   /* ---------------------------------------------------------------- config */
@@ -261,6 +278,8 @@
   let follow = true;
   let fitted = false;
   let lastPollAt = 0, pollOk = null;
+  // What the drawn markers currently represent. The map is rebuilt only when this changes.
+  let drawnSignature = null;
   const colours = new Map();
 
   const colourFor = dev => {
@@ -387,21 +406,35 @@
       pollOk === false ? "offline" : lastPollAt ? `checked ${fmtAgo(Date.now()-lastPollAt)} ago` : "…";
   }
 
+  /**
+   * One chip per device that has ever posted, always shown — including when there is only one.
+   * A device that is streaming has a chip; a device that is not has no chip at all, and that
+   * absence is the whole point of the strip on a two-phone walk. The age is the second half of
+   * the answer: a chip stuck at "22m" is a phone that has stopped.
+   */
   function renderDevices() {
     const box = document.getElementById("devices");
-    const devs = [...new Set(points.map(p => p.dev))];
-    box.hidden = devs.length < 2;
-    if (box.hidden) { box.innerHTML = ""; return; }
-
+    box.hidden = false;
     box.innerHTML = "";
+
+    const devs = [...new Set(points.map(p => p.dev))];
+    if (!devs.length) {
+      box.innerHTML = `<span class="waiting">No device has posted yet.</span>`;
+      return;
+    }
+
     for (const dev of devs) {
-      const n = points.filter(p => p.dev === dev).length;
+      const mine = points.filter(p => p.dev === dev);
+      const last = Math.max(...mine.map(p => p.at));
       const b = document.createElement("button");
-      b.className = "chip";
+      b.className = "chip" + (Date.now() - last > STALE_MS ? " stale" : "");
       b.setAttribute("aria-pressed", String(!hidden.has(dev)));
+      b.title = hidden.has(dev) ? "Show this device" : "Hide this device";
       b.style.color = hidden.has(dev) ? "" : colourFor(dev);
       b.innerHTML = `<span class="swatch" style="background:${colourFor(dev)}"></span>` +
-                    `<span>${escapeHtml(dev)}</span><span class="n">${n}</span>`;
+                    `<span>${escapeHtml(dev)}</span>` +
+                    `<span class="n">${mine.length}</span>` +
+                    `<span class="ago">· <span data-ago="${last}">${fmtAgo(Date.now()-last)}</span></span>`;
       b.addEventListener("click", () => {
         hidden.has(dev) ? hidden.delete(dev) : hidden.add(dev);
         render();
@@ -410,7 +443,32 @@
     }
   }
 
+  /**
+   * **Rebuilt only when the points actually change.** Redrawing on every poll — which is what
+   * this did first — destroys each marker every five seconds, and with it any popup the user has
+   * open: clicking a pin showed its detail for a moment and then silently lost it. Selection is
+   * in the signature because it changes a marker's ring.
+   */
   function renderMap(vis) {
+    const signature = vis.map(p => p.key).join(",") + "|" + selected;
+
+    if (signature !== drawnSignature) {
+      drawnSignature = signature;
+      drawPoints(vis);
+    }
+
+    if (!vis.length) return;
+
+    if (!fitted) {
+      map.fitBounds(L.latLngBounds(vis.map(p => [p.lat,p.lng])).pad(.25), { maxZoom: 16 });
+      fitted = true;
+    } else if (follow) {
+      const n = vis[vis.length-1];
+      if (!map.getBounds().pad(-0.15).contains([n.lat, n.lng])) map.panTo([n.lat, n.lng]);
+    }
+  }
+
+  function drawPoints(vis) {
     layer.clearLayers();
     if (!vis.length) return;
 
@@ -456,17 +514,24 @@
           `<span class="m">±${p.acc == null ? "?" : Math.round(p.acc)} m · ${escapeHtml(p.src)}` +
           (prev ? ` · +${fmtDist(metresBetween(prev,p))}` : "") + `</span>`
         );
-        marker.on("click", () => { selected = p.key; render(); scrollToPoint(p.key); });
+        // Only the newest of each trail carries a label; one on every pin would be a wall of text.
+        if (newest) {
+          marker.bindTooltip(escapeHtml(p.dev), {
+            permanent: true, direction: "right", offset: [size/2 + 4, 0], className: "dev-label"
+          });
+        }
+
+        // Only the list is redrawn. A full render() here — which is what this did first — clears
+        // the layer group and destroys this very marker while Leaflet is opening its popup, so
+        // the click highlighted the row and showed nothing on the map.
+        marker.on("click", () => {
+          selected = p.key;
+          renderHistory(visible());
+          scrollToPoint(p.key);
+        });
       });
     }
 
-    if (!fitted) {
-      map.fitBounds(L.latLngBounds(vis.map(p => [p.lat,p.lng])).pad(.25), { maxZoom: 16 });
-      fitted = true;
-    } else if (follow) {
-      const n = vis[vis.length-1];
-      if (!map.getBounds().pad(-0.15).contains([n.lat, n.lng])) map.panTo([n.lat, n.lng]);
-    }
   }
 
   function renderHistory(vis) {
@@ -494,8 +559,6 @@
       return { ...p, n };
     }).reverse();
 
-    const multiDevice = new Set(vis.map(p => p.dev)).size > 1;
-
     for (const p of ordered) {
       const sameDev = vis.filter(q => q.dev === p.dev);
       const at = sameDev.findIndex(q => q.key === p.key);
@@ -513,14 +576,14 @@
       li.innerHTML =
         `<span class="idx" style="background:${colourFor(p.dev)}">${p.n}</span>
          <div class="row1">
-           <span class="when">${fmtAgo(Date.now()-p.at)} ago</span>
+           <span class="dev" style="color:${colourFor(p.dev)}">${escapeHtml(p.dev)}</span>
+           <span class="when"><span data-ago="${p.at}">${fmtAgo(Date.now()-p.at)}</span> ago</span>
            <span class="abs">${fmtClock(p.at)}</span>
          </div>
          <button class="del" title="Delete this point">&times;</button>
          <div class="row2">
            <span class="tag ${accClass(p.acc)}">${acc}</span>
            <span class="tag">${escapeHtml(p.src)}</span>
-           ${multiDevice ? `<span class="tag">${escapeHtml(p.dev)}</span>` : ""}
            <span>${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
            <span class="gap">${gap}</span>
          </div>`;
@@ -554,15 +617,34 @@
 
   followBtn.addEventListener("click", () => { follow = !follow; syncFollow(); render(); });
   document.getElementById("btnFit").addEventListener("click", () => { fitted = false; render(); });
+  // A delete or a clear changes the point set, so the signature catches those on its own.
   document.getElementById("btnClear").addEventListener("click", removeAll);
   map.on("dragstart", () => { if (follow) { follow = false; syncFollow(); } });
 
   /* ------------------------------------------------------------------ loop */
 
+  /**
+   * Between polls only the *ages* change, so only the ages are rewritten. Re-rendering wholesale
+   * on a one-second timer — which this did first — closes whatever popup is open, throws away the
+   * history's scroll position, and repaints every marker, all once a second.
+   */
+  function tick() {
+    const vis = visible();
+    const newest = vis.length ? vis[vis.length-1].at : null;
+
+    document.getElementById("sLast").textContent = newest ? fmtAgo(Date.now()-newest) : "—";
+    document.getElementById("sPoll").textContent =
+      pollOk === false ? "offline" : lastPollAt ? `checked ${fmtAgo(Date.now()-lastPollAt)} ago` : "…";
+
+    for (const el of document.querySelectorAll("[data-ago]")) {
+      el.textContent = fmtAgo(Date.now() - Number(el.dataset.ago));
+    }
+  }
+
   poll();
   setInterval(poll, POLL_MS);
   // Keeps "4m ago" honest between polls, which is the number being watched on a walk.
-  setInterval(() => render(), 1000);
+  setInterval(tick, 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
 })();
 </script>
