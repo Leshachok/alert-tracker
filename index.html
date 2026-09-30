@@ -162,6 +162,9 @@
     display:grid;place-items:center;border-radius:50%;font-size:11px;font-weight:700;
     color:#0b0e13;border:2px solid rgba(11,14,19,.65);font-variant-numeric:tabular-nums
   }
+  /* A fix taken offline and delivered later from the app's queue. */
+  .marker-n.queued{border:2px dashed #0b0e13}
+  .tag.queued{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
   .marker-n.rejected{
     background:transparent!important;border:2px dashed var(--bad);color:var(--bad);
     box-shadow:none!important
@@ -323,6 +326,13 @@
     new Date(t).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
 
   // The number that decides whether the fix is usable at all: the app needs 300 m – 1 km.
+  // How long the fix waited before the backend had it: seconds for a live upload, the offline
+  // stretch for a queued one.
+  function sentDelay(p) {
+    const d = p.sent - p.at;
+    return d < 60000 ? "live" : `+${fmtAgo(d)} later`;
+  }
+
   function accClass(acc) {
     if (acc == null) return "";
     if (acc <= 300) return "acc-ok";
@@ -345,7 +355,9 @@
           at:  Number(p.at) || 0,
           dev: String(p.dev || "unknown"),
           src: String(p.src || "?"),
-          rej: p.rej == null ? null : String(p.rej)
+          rej: p.rej == null ? null : String(p.rej),
+          // When the backend accepted the fix; absent on points from before the field existed.
+          sent: p.sent == null ? null : Number(p.sent)
         }))
         .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng))
         .sort((a,b) => a.at - b.at);
@@ -532,7 +544,7 @@
             className: "",
             iconSize: [size, size],
             iconAnchor: [size/2, size/2],
-            html: `<div class="marker-n${p.rej ? " rejected" : ""}"
+            html: `<div class="marker-n${p.rej ? " rejected" : ""}${p.src === "queued" ? " queued" : ""}"
                     style="width:${size}px;height:${size}px;background:${colour};
                     ${p.key === selected ? "box-shadow:0 0 0 4px rgba(88,166,255,.5);" : ""}
                     ${newest ? "box-shadow:0 0 0 5px " + colour + "33;" : ""}">${label}</div>`
@@ -544,6 +556,7 @@
           `<b>${p.rej ? "refused" : "#" + n} · ${escapeHtml(p.dev)}</b>` +
           (p.rej ? `<span class="m" style="color:#f85149">${escapeHtml(p.rej)}</span>` : "") +
           `<span class="m">${fmtClock(p.at)} · ${fmtAgo(Date.now()-p.at)} ago</span>` +
+          (p.sent ? `<span class="m">server ${fmtClock(p.sent)} · ${sentDelay(p)}</span>` : "") +
           `<span class="m">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>` +
           `<span class="m">±${p.acc == null ? "?" : Math.round(p.acc)} m · ${escapeHtml(p.src)}` +
           (prev ? ` · +${fmtDist(metresBetween(prev,p))}` : "") + `</span>`
@@ -622,6 +635,7 @@
            <span class="tag ${accClass(p.acc)}">${acc}</span>
            <span class="tag">${escapeHtml(p.src)}</span>
            ${p.rej ? `<span class="tag rej">refused: ${escapeHtml(p.rej)}</span>` : ""}
+           ${p.sent ? `<span class="tag${p.src === "queued" ? " queued" : ""}">server ${sentDelay(p)}</span>` : ""}
            <span>${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
            <span class="gap">${gap}</span>
          </div>`;
