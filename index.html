@@ -333,6 +333,9 @@
     return d < 60000 ? "live" : `+${fmtAgo(d)} later`;
   }
 
+  // Sent from the queue by the app ("queued") or by iOS's background session ("handed_off").
+  const isQueued = p => p.src === "queued" || p.src === "handed_off";
+
   function accClass(acc) {
     if (acc == null) return "";
     if (acc <= 300) return "acc-ok";
@@ -544,7 +547,7 @@
             className: "",
             iconSize: [size, size],
             iconAnchor: [size/2, size/2],
-            html: `<div class="marker-n${p.rej ? " rejected" : ""}${p.src === "queued" ? " queued" : ""}"
+            html: `<div class="marker-n${p.rej ? " rejected" : ""}${isQueued(p) ? " queued" : ""}"
                     style="width:${size}px;height:${size}px;background:${colour};
                     ${p.key === selected ? "box-shadow:0 0 0 4px rgba(88,166,255,.5);" : ""}
                     ${newest ? "box-shadow:0 0 0 5px " + colour + "33;" : ""}">${label}</div>`
@@ -635,7 +638,7 @@
            <span class="tag ${accClass(p.acc)}">${acc}</span>
            <span class="tag">${escapeHtml(p.src)}</span>
            ${p.rej ? `<span class="tag rej">refused: ${escapeHtml(p.rej)}</span>` : ""}
-           ${p.sent ? `<span class="tag${p.src === "queued" ? " queued" : ""}">server ${sentDelay(p)}</span>` : ""}
+           ${p.sent ? `<span class="tag${isQueued(p) ? " queued" : ""}">server ${sentDelay(p)}</span>` : ""}
            <span>${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
            <span class="gap">${gap}</span>
          </div>`;
